@@ -906,7 +906,15 @@ async function saveWebhook(btn) {
     input.focus();
     return;
   }
-  if (!/^https:\/\/(discord\.com|discordapp\.com)\/api\/webhooks\//.test(url)) {
+  // Must match isDiscordWebhookURL() in main.go exactly (Go is the source
+  // of truth).
+  const prefixes = [
+    'https://discord.com/api/webhooks/',
+    'https://discordapp.com/api/webhooks/',
+    'https://ptb.discord.com/api/webhooks/',
+    'https://canary.discord.com/api/webhooks/'
+  ];
+  if (!prefixes.some((p) => url.startsWith(p))) {
     showToast('URL must start with https://discord.com/api/webhooks/', 'error');
     input.focus();
     return;

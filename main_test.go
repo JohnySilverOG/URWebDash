@@ -1244,3 +1244,75 @@ func TestParseSize(t *testing.T) {
 		}
 	}
 }
+
+// Table-driven coverage for the webhook helpers introduced with the
+// dashboard webhook section. Masking is security-sensitive: the full
+// webhook token must never reach the browser.
+
+func TestMaskWebhookURL(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "full webhook url is masked",
+			in:   "https://discord.com/api/webhooks/1234567890/AbCdEfGhIjKlMnOpQrStUvWxYz",
+			want: "https://discord.com/api/webhooks/1234567890/AbCd…",
+		},
+		{
+			name: "four-char tail kept as-is",
+			in:   "https://discord.com/api/webhooks/1/abcd",
+			want: "https://discord.com/api/webhooks/1/abcd",
+		},
+		{
+			name: "short tail kept as-is",
+			in:   "https://discord.com/api/webhooks/1/ab",
+			want: "https://discord.com/api/webhooks/1/ab",
+		},
+		{
+			name: "trailing slash kept as-is",
+			in:   "https://discord.com/api/webhooks/",
+			want: "https://discord.com/api/webhooks/",
+		},
+		{
+			name: "no slash returned unchanged",
+			in:   "not-a-url",
+			want: "not-a-url",
+		},
+		{
+			name: "empty string unchanged",
+			in:   "",
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		if got := maskWebhookURL(tc.in); got != tc.want {
+			t.Errorf("%s: maskWebhookURL(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestIsDiscordWebhookURL(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{name: "discord.com", url: "https://discord.com/api/webhooks/123/token", want: true},
+		{name: "discordapp.com", url: "https://discordapp.com/api/webhooks/123/token", want: true},
+		{name: "ptb.discord.com", url: "https://ptb.discord.com/api/webhooks/123/token", want: true},
+		{name: "canary.discord.com", url: "https://canary.discord.com/api/webhooks/123/token", want: true},
+		{name: "bare prefix", url: "https://discord.com/api/webhooks/", want: true},
+		{name: "http not accepted", url: "http://discord.com/api/webhooks/123/token", want: false},
+		{name: "foreign host", url: "https://evil.example/api/webhooks/123/token", want: false},
+		{name: "discord lookalike host", url: "https://discord.com.evil.example/api/webhooks/123/token", want: false},
+		{name: "wrong path", url: "https://discord.com/api/other/123", want: false},
+		{name: "empty string", url: "", want: false},
+	}
+	for _, tc := range cases {
+		if got := isDiscordWebhookURL(tc.url); got != tc.want {
+			t.Errorf("%s: isDiscordWebhookURL(%q) = %v, want %v", tc.name, tc.url, got, tc.want)
+		}
+	}
+}
