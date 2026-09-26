@@ -1316,3 +1316,60 @@ func TestIsDiscordWebhookURL(t *testing.T) {
 		}
 	}
 }
+
+// Clearing the saved URL must report the effective live state: removing
+// the ~/.urnetwork/discord_webhook file does not stop a DISCORD_WEBHOOK_URL
+// env-var webhook, so the response must say configured:true, source:"env"
+// when the env var is still set.
+func TestHandleWebhookClearReportsEffectiveState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	saved := filepath.Join(home, ".urnetwork", "discord_webhook")
+	savedURL := "https://discord.com/api/webhooks/1/saved-token"
+
+	doClear := func() map[string]interface{} {
+		if err := os.MkdirAll(filepath.Dir(saved), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(saved, []byte(savedURL), 0600); err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest("POST", "/api/webhook", strings.NewReader(`{"url":""}`))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handleWebhook(rec, req)
+		var got map[string]interface{}
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode response: %v (body=%q)", err, rec.Body.String())
+		}
+		return got
+	}
+	fileGone := func() bool {
+		_, err := os.Stat(saved)
+		return os.IsNotExist(err)
+	}
+
+	t.Run("no env var: clear reports not configured", func(t *testing.T) {
+		t.Setenv("DISCORD_WEBHOOK_URL", "")
+		got := doClear()
+		if got["configured"] != false {
+			t.Errorf("configured = %v, want false", got["configured"])
+		}
+		if !fileGone() {
+			t.Error("saved file was not removed")
+		}
+	})
+	t.Run("env var set: clear reports still configured via env", func(t *testing.T) {
+		t.Setenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/9/env-token")
+		got := doClear()
+		if got["configured"] != true {
+			t.Errorf("configured = %v, want true (env webhook still live)", got["configured"])
+		}
+		if got["source"] != "env" {
+			t.Errorf("source = %v, want env", got["source"])
+		}
+		if !fileGone() {
+			t.Error("saved file should still be removed even though env webhook lives")
+		}
+	})
+}

@@ -1450,7 +1450,14 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			fmt.Println("[webhook] stored URL cleared")
-			json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "configured": false})
+			resp := map[string]interface{}{"ok": true, "configured": false}
+			if envURL := strings.TrimSpace(os.Getenv("DISCORD_WEBHOOK_URL")); envURL != "" {
+				// Only the saved file was removed; a DISCORD_WEBHOOK_URL env
+				// var still applies, so report the effective live state.
+				resp["configured"] = true
+				resp["source"] = "env"
+			}
+			json.NewEncoder(w).Encode(resp)
 			return
 		}
 		if !isDiscordWebhookURL(url) {
