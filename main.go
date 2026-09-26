@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -1286,6 +1287,8 @@ func discordWebhookPath() string {
 	return filepath.Join(home, ".urnetwork", "discord_webhook")
 }
 
+// discordWebhookFileURL returns the URL saved from the dashboard (empty
+// string when none is stored).
 func discordWebhookFileURL() string {
 	b, err := os.ReadFile(discordWebhookPath())
 	if err != nil {
@@ -1294,6 +1297,9 @@ func discordWebhookFileURL() string {
 	return strings.TrimSpace(string(b))
 }
 
+// discordWebhookURL resolves the effective webhook URL: the
+// DISCORD_WEBHOOK_URL env var wins when set, otherwise the URL saved from
+// the dashboard is used.
 func discordWebhookURL() string {
 	if url := os.Getenv("DISCORD_WEBHOOK_URL"); url != "" {
 		return url
@@ -1332,10 +1338,14 @@ func maskWebhookURL(u string) string {
 }
 
 // sendDiscordWebhook posts a message and reports the HTTP status / error
-// synchronously so callers can surface the result.
+// synchronously so callers can surface the result. It uses the shared
+// 15s-timeout httpClient: a stalled upstream must not hang the caller
+// (handleWebhookTest calls this synchronously inside a request handler).
+// On transport failure the returned error may embed the full webhook URL
+// (with its secret token), so API handlers must not echo it to clients.
 func sendDiscordWebhook(url, content string) (int, error) {
 	body, _ := json.Marshal(map[string]string{"content": content})
-	resp, err := http.Post(url, "application/json", strings.NewReader(string(body)))
+	resp, err := httpClient.Post(url, "application/json", strings.NewReader(string(body)))
 	if err != nil {
 		return 0, err
 	}
@@ -1347,6 +1357,9 @@ func sendDiscordWebhook(url, content string) (int, error) {
 	return resp.StatusCode, nil
 }
 
+// sendDiscordNotification posts content to the resolved webhook URL
+// asynchronously so a slow Discord round-trip never blocks the poller. It
+// logs and gives up when no URL is configured.
 func sendDiscordNotification(content string) {
 	url := discordWebhookURL()
 	if url == "" {
@@ -1360,9 +1373,38 @@ func sendDiscordNotification(content string) {
 	}()
 }
 
+// webhookCSRFCheck rejects cross-site write requests before any webhook
+// state is touched or any message is sent. The dashboard client always
+// posts with Content-Type application/json, so other media types (and a
+// missing Content-Type) are refused; browsers attach an Origin header to
+// POSTs, and a foreign Origin is refused. Requests without an Origin
+// header (curl, scripts, tests) pass — the check only exists to stop
+// browser-driven CSRF.
+func webhookCSRFCheck(w http.ResponseWriter, r *http.Request) bool {
+	reject := func(msg string) {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	}
+	ct := r.Header.Get("Content-Type")
+	if mt, _, err := mime.ParseMediaType(ct); ct == "" || err != nil || mt != "application/json" {
+		reject("Content-Type must be application/json")
+		return false
+	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || u.Host != r.Host {
+			reject("cross-origin request rejected")
+			return false
+		}
+	}
+	return true
+}
+
 // handleWebhook powers the dashboard webhook section: GET returns the
 // configured state (URL masked), POST saves a new URL or clears it with an
-// empty string. DISCORD_WEBHOOK_URL env var wins if set.
+// empty string. DISCORD_WEBHOOK_URL env var wins if set. POSTs go through
+// webhookCSRFCheck first so a cross-site request cannot replace or clear
+// the saved URL.
 func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	switch r.Method {
@@ -1389,6 +1431,9 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		json.NewEncoder(w).Encode(resp)
 	case "POST":
+		if !webhookCSRFCheck(w, r) {
+			return
+		}
 		var req struct {
 			URL string `json:"url"`
 		}
@@ -1430,11 +1475,17 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 // handleWebhookTest sends a sample notification. Optional body {"url": "..."}
 // tests the given URL (e.g. what is in the input box before saving);
-// without a body it tests the configured URL.
+// without a body it tests the configured URL. The request goes through
+// webhookCSRFCheck first, and transport errors are returned as a generic
+// message so the webhook's secret token (which can appear inside a
+// transport error) is never echoed to the client.
 func handleWebhookTest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != "POST" {
 		http.Error(w, "method not allowed", 405)
+		return
+	}
+	if !webhookCSRFCheck(w, r) {
 		return
 	}
 	url := discordWebhookURL()
@@ -1455,6 +1506,13 @@ func handleWebhookTest(w http.ResponseWriter, r *http.Request) {
 	content := "✅ **URWebDash test notification**\nWebhook is working. Payout and traffic-spike alerts will arrive here."
 	status, err := sendDiscordWebhook(url, content)
 	if err != nil {
+		if status == 0 {
+			// Transport-level failure: the error can embed the full webhook
+			// URL (with its secret token), so return a generic message.
+			jsonError(w, "webhook request failed")
+			return
+		}
+		// Non-success HTTP response: surface Discord's actual response body.
 		jsonError(w, err.Error())
 		return
 	}
